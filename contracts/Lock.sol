@@ -4,31 +4,68 @@ pragma solidity ^0.8.9;
 // Uncomment this line to use console.log
 // import "hardhat/console.sol";
 
-contract Lock {
-    uint public unlockTime;
-    address payable public owner;
+contract ChainBreak {
+    enum LoanStatus {Pending, Confirmed, Closed}
 
-    event Withdrawal(uint amount, uint when);
-
-    constructor(uint _unlockTime) payable {
-        require(
-            block.timestamp < _unlockTime,
-            "Unlock time should be in the future"
-        );
-
-        unlockTime = _unlockTime;
-        owner = payable(msg.sender);
+    struct Loan {
+        uint amount;
+        uint closeAmount;
+        uint32 ttl;
+        uint32 createdAt;
+        uint32 closedAt;
+        LoanStatus status;
+        bool autoClose;
+        string description;
     }
 
-    function withdraw() public {
-        // Uncomment this line, and the import of "hardhat/console.sol", to print a log in your terminal
-        // console.log("Unlock time is %o and block timestamp is %o", unlockTime, block.timestamp);
-
-        require(block.timestamp >= unlockTime, "You can't withdraw yet");
-        require(msg.sender == owner, "You aren't the owner");
-
-        emit Withdrawal(address(this).balance, block.timestamp);
-
-        owner.transfer(address(this).balance);
+    struct User {
+        // just for indexing
+        address[] lenders;
+        // only 1 loan for person for mvp
+        // lender => loan
+        mapping (address => Loan) loans;
+        // back index
+        address[] borrowers;
     }
+
+    struct UserLoan {
+        address user;
+        Loan loan;
+    }
+
+    address[] usersIndex;
+    mapping (address => User) users;
+
+    uint public constant BUILDER_FEE = 0.001 ether;
+
+    constructor() {}
+
+
+    function getUserData(address user) external view returns (
+        // loans lender -> user
+        // loans user -> borrower
+        UserLoan[] memory fromUsers,
+        UserLoan[] memory toUsers
+    ) {
+        fromUsers = new UserLoan[](users[user].lenders.length);
+        toUsers = new UserLoan[](users[user].borrowers.length);
+
+        for (uint i = 0; i < fromUsers.length; i++) {
+            address lender = users[user].lenders[i];
+            Loan memory loan = users[user].loans[lender];
+            fromUsers[i] = UserLoan(lender, loan);
+        }
+
+        for (uint i = 0; i < toUsers.length; i++) {
+            address borrower = users[user].borrowers[i];
+            Loan memory loan = users[borrower].loans[user];
+            toUsers[i] = UserLoan(borrower, loan);
+        }
+    }
+
+    function getLoan(address lender, uint amount, uint32 ttl, string calldata description) external {}
+
+    function giveLoan(address borrower, uint amount, uint32 ttl, string calldata description) external {}
+
+    function confirmLoan(address lender) external {}
 }
