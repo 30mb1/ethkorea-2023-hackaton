@@ -1,172 +1,94 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.9;
+pragma solidity ^0.8.0;
 
-import "./interfaces/IChainBreak.sol";
 import "./Utility.sol";
-// Uncomment this line to use console.log
-// import "hardhat/console.sol";
 
-contract ChainBreak is IChainBreak {
-    event Borrowed(address borrower, address lender, Loan _loan);
-    event Confirmed(address borrower, address lender, Loan _loan);
-    event LoanFill(address borrower, address lender, Loan _loan);
+contract ChainBreak {
+    event Transaction(address user1, address user2, Tx transaction, uint idx);
+    event TransactionConfirmed(address user1, address user2, Tx transaction, uint idx);
 
-    enum LoanStatus {Pending, Confirmed, Closed}
+    enum TxStatus {CreatedBy1, CreatedBy2, Confirmed}
+    enum TxType {Regular, Auto}
 
-    struct Loan {
-        uint amount;
-        uint closedAmount;
-        uint32 ttl;
-        uint32 createdAt;
-        uint32 closedAt;
-        LoanStatus status;
-        bool autoClose;
+    struct Tx {
+        int amount;
         string description;
+        uint32 createdAt;
+        bool from1; // true: 1 -> 2, false: 2 -> 1
+        TxStatus status;
+        TxType txType;
     }
 
-    struct User {
-        // just for indexing
-        address[] lenders;
-        // only 1 loan for person for mvp
-        // lender => loan
-        mapping (address => Loan) loans;
-        // back index
-        address[] borrowers;
+    struct Channel {
+        int balance1;
+        int balance2;
+        uint fees;
+
+        Tx[] txs;
     }
 
-    struct UserLoan {
-        address user;
-        Loan loan;
+    mapping (address => mapping (address => Channel)) private channels;
+
+    function sort(address user1, address user2) public pure returns (address, address) {
+        return user1 <= user2 ? (user1, user2) : (user2, user1);
     }
 
-    address[] private usersIndex;
-    mapping (address => User) private users;
+    function channelFor(address user1, address user2) public view returns (Channel memory) {
+        (user1, user2) = sort(user1, user2);
+        return channels[user1][user2];
+    }
 
-    uint public constant BUILDER_FEE = 0.001 ether;
+    function createTx(address user, int amount, string calldata description, bool send) external payable {
+        require (amount > 0, "ChainBreak::createTx: negative amount");
 
-    constructor() {}
+        (address user1, address user2) = sort(msg.sender, user);
+        TxStatus _status = msg.sender == user1 ? TxStatus.CreatedBy1 : TxStatus.CreatedBy2;
 
-    function getUserData(address user) external view returns (
-        // loans lender -> user
-        // loans user -> borrower
-        UserLoan[] memory fromUsers,
-        UserLoan[] memory toUsers
-    ) {
-        fromUsers = new UserLoan[](users[user].lenders.length);
-        toUsers = new UserLoan[](users[user].borrowers.length);
-
-        for (uint i = 0; i < fromUsers.length; i++) {
-            address lender = users[user].lenders[i];
-            Loan memory loan = users[user].loans[lender];
-            fromUsers[i] = UserLoan(lender, loan);
+        bool _from1;
+        if (_status == TxStatus.CreatedBy1) {
+            _from1 = send;
+        } else {
+            _from1 = !send;
         }
 
-        for (uint i = 0; i < toUsers.length; i++) {
-            address borrower = users[user].borrowers[i];
-            Loan memory loan = users[borrower].loans[user];
-            toUsers[i] = UserLoan(borrower, loan);
-        }
+        Channel storage _channel = channels[user1][user2];
+        Tx memory _tx = Tx(amount, description, uint32(block.timestamp), _from1, _status, TxType.Regular);
+        _channel.fees += msg.value;
+        _channel.txs.push(_tx);
+
+        emit Transaction(user1, user2, _tx, _channel.txs.length - 1);
     }
 
-    function borrow(address lender, uint amount, uint32 ttl, bool autoClose, string calldata description) external payable {
-        require (amount > 0, "ChainBreak::resolveLoanCircuit: zero amount");
-        require (msg.value == BUILDER_FEE, "ChainBreak::borrow: incorrect msg. value");
-        require (users[msg.sender].loans[lender].amount == 0, "ChainBreak::borrow: already borrowed");
+    function confirmTx(address user, uint idx) external {
+        (address user1, address user2) = sort(msg.sender, user);
 
-        Loan memory _loan = Loan({
-            amount : amount,
-            closedAmount : 0,
-            autoClose : autoClose,
-            closedAt : 0,
-            createdAt : uint32(block.timestamp),
-            status : LoanStatus.Pending,
-            description : description,
-            ttl : ttl
-        });
-        users[msg.sender].loans[lender] = _loan;
-        users[msg.sender].lenders.push(lender);
-        users[lender].borrowers.push(msg.sender);
+        Channel storage _channel = channels[user1][user2];
+        Tx memory _tx = _channel.txs[idx];
 
-        emit Borrowed(msg.sender, lender, _loan);
-    }
+        require (!(_tx.status == TxStatus.Confirmed), "ChainBreak::confirmTx: bad status");
+        require (!(_tx.amount > 0), "ChainBreak::confirmTx: bad amount");
 
-    function lend(address borrower, uint amount, uint32 ttl, string calldata description) external {
-        require (amount > 0, "ChainBreak::resolveLoanCircuit: zero amount");
-        require (users[borrower].loans[msg.sender].amount == 0, "ChainBreak::borrow: already borrowed");
-
-        Loan memory _loan = Loan({
-            amount : amount,
-            closedAmount : 0,
-            autoClose : false,
-            closedAt : 0,
-            createdAt : uint32(block.timestamp),
-            status : LoanStatus.Pending,
-            description : description,
-            ttl : ttl
-        });
-        users[borrower].loans[msg.sender] = _loan;
-        users[borrower].lenders.push(msg.sender);
-        users[msg.sender].borrowers.push(borrower);
-
-        emit Borrowed(borrower, msg.sender, _loan);
-    }
-
-    function confirmLoanByBorrower(address lender, bool autoClose) external payable {
-        require (msg.value == BUILDER_FEE, "ChainBreak::borrow: incorrect msg. value");
-        require (users[msg.sender].loans[lender].amount > 0, "ChainBreak::borrow: no loan");
-        require (users[msg.sender].loans[lender].status == LoanStatus.Pending, "ChainBreak::borrow: bad status");
-
-        Loan memory _loan = users[msg.sender].loans[lender];
-        _loan.status = LoanStatus.Confirmed;
-        _loan.autoClose = autoClose;
-        users[msg.sender].loans[lender] = _loan;
-
-        emit Confirmed(msg.sender, lender, _loan);
-    }
-
-    function confirmLoanByLender(address borrower) external {
-        require (users[borrower].loans[msg.sender].amount > 0, "ChainBreak::borrow: no loan");
-        require (users[borrower].loans[msg.sender].status == LoanStatus.Pending, "ChainBreak::borrow: bad status");
-
-        Loan memory _loan = users[borrower].loans[msg.sender];
-        _loan.status = LoanStatus.Confirmed;
-        users[borrower].loans[msg.sender] = _loan;
-
-        emit Confirmed(borrower, msg.sender, _loan);
-    }
-
-
-    function resolveLoanCircuit(address[] calldata circuit, uint amount) external {
-        require (amount > 0, "ChainBreak::resolveLoanCircuit: zero amount");
-        require (circuit[0] == circuit[circuit.length - 1], "ChainBreak::resolveLoanCircuit: incorrect circuit");
-
-        uint160[] memory addrs = new uint160[](circuit.length);
-        for (uint i = 0; i < circuit.length; i++) {
-            addrs[i] = uint160(circuit[i]);
+        if (_tx.status == TxStatus.CreatedBy1) {
+            require (msg.sender == user2, "ChainBreak::confirmTx: cant confirm");
+        } else {
+            require (msg.sender == user1, "ChainBreak::confirmTx: cant confirm");
         }
 
-        addrs = Utility.sort(addrs);
-        for (uint i = 0; i < addrs.length - 1; i++) {
-            require (addrs[i] < addrs[i + 1], "ChainBreak::resolveLoanCircuit: duplicate elems");
+        _tx.status == TxStatus.Confirmed;
+        if (_tx.from1) {
+            _channel.balance1 += _tx.amount;
+            _channel.balance2 -= _tx.amount;
+        } else {
+            _channel.balance1 -= _tx.amount;
+            _channel.balance2 += _tx.amount;
         }
 
-        for (uint i = 0; i < circuit.length - 1; i++) {
-            address borrower = circuit[i];
-            address lender = circuit[i + 1];
-
-            Loan memory _loan = users[borrower].loans[lender];
-            require (_loan.autoClose, "ChainBreak::resolveLoanCircuit: auto close not permitted");
-            require (_loan.amount - _loan.closedAmount >= amount, "ChainBreak::resolveLoanCircuit: bad amount");
-            require (_loan.status == LoanStatus.Confirmed, "ChainBreak::resolveLoanCircuit: bad loan status");
-
-            _loan.closedAmount += amount;
-            if (_loan.closedAmount == _loan.amount) {
-                _loan.status = LoanStatus.Closed;
-                _loan.closedAt = uint32(block.timestamp);
-            }
-
-            users[borrower].loans[lender] = _loan;
-            emit LoanFill(borrower, lender, _loan);
-        }
+        _channel.txs[idx] = _tx;
+        emit TransactionConfirmed(user1, user2, _tx, idx);
     }
+
+    function breakDebtCircuit(address[] memory users, uint amount) external {
+        address[] memory sorted = Utility.sort(users);
+    }
+
 }
